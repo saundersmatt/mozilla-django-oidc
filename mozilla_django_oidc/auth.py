@@ -1,6 +1,8 @@
 import base64
+import datetime
 import hashlib
 import json
+import jwt
 import logging
 import requests
 import six
@@ -54,11 +56,20 @@ class OIDCAuthenticationBackend(ModelBackend):
         self.OIDC_RP_CLIENT_SECRET = self.get_settings('OIDC_RP_CLIENT_SECRET')
         self.OIDC_RP_SIGN_ALGO = self.get_settings('OIDC_RP_SIGN_ALGO', 'HS256')
         self.OIDC_RP_IDP_SIGN_KEY = self.get_settings('OIDC_RP_IDP_SIGN_KEY', None)
+        self.OIDC_CLIENT_ASSERTION = self.get_settings('OIDC_CLIENT_ASSERTION')
+        self.OIDC_CLIENT_ASSERTION_SIGN_ALGO = self.get_settings('OIDC_CLIENT_ASSERTION_SIGN_ALGO', 'HS256')
+        self.OIDC_CLIENT_ASSERTION_SIGN_KEY = self.get_settings('OIDC_CLIENT_ASSERTION_SIGN_KEY')
 
         if (self.OIDC_RP_SIGN_ALGO.startswith('RS') and
                 (self.OIDC_RP_IDP_SIGN_KEY is None and self.OIDC_OP_JWKS_ENDPOINT is None)):
             msg = '{} alg requires OIDC_RP_IDP_SIGN_KEY or OIDC_OP_JWKS_ENDPOINT to be configured.'
             raise ImproperlyConfigured(msg.format(self.OIDC_RP_SIGN_ALGO))
+
+        if (self.OIDC_CLIENT_ASSERTION_SIGN_ALGO.startswith('RS') and
+                self.OIDC_CLIENT_ASSERTION_SIGN_KEY is None):
+            msg = '{} alg requires OIDC_CLIENT_ASSERTION_SIGN_KEY to be configured.'
+            raise ImproperlyConfigured(msg.format(self.OIDC_CLIENT_ASSERTION_SIGN_ALGO))
+
 
         self.UserModel = get_user_model()
 
@@ -266,6 +277,14 @@ class OIDCAuthenticationBackend(ModelBackend):
             ),
         }
 
+        # Check whether paylod should include Client Assertion
+        if self.get_settings('OIDC_CLIENT_ASSERTION', False):
+            assertion_payload = { 
+                'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+                'client_assertion': self._generate_client_assertion(),
+            }
+            token_payload.update(assertion_payload)
+
         # Get the token
         token_info = self.get_token(token_payload)
         id_token = token_info.get('id_token')
@@ -332,3 +351,22 @@ class OIDCAuthenticationBackend(ModelBackend):
             return self.UserModel.objects.get(pk=user_id)
         except self.UserModel.DoesNotExist:
             return None
+
+    def _generate_client_assertion(self):
+        """Sign and return a client assertion to authentication payload"""
+
+        expiry_delta = self.get_settings('OIDC_CLIENT_ASSERTION_DELTA', 30)
+
+        client_assertion = {
+            'iss': self.get_settings('OIDC_RP_CLIENT_ID'),
+            'sub': self.get_settings('OIDC_RP_CLIENT_ID'),
+            'aud': self.get_settings('OIDC_OP_TOKEN_ENDPOINT'),
+            'exp': datetime.datetime.utcnow() + datetime.timedelta(seconds=expiry_delta)
+        }
+
+        encoded_client_assertion = jwt.encode(
+            client_assertion,
+            self.OIDC_CLIENT_ASSERTION_SIGN_KEY,
+            algorithm = self.OIDC_CLIENT_ASSERTION_SIGN_ALGO
+        )
+        return encoded_client_assertion
